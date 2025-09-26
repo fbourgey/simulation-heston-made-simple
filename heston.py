@@ -71,3 +71,96 @@ def impvol_heston_charfunc(k, tau, params):
     opttype = 2 * (k > 0) - 1  # otm options
     impvol = black_impvol(K=np.exp(k), T=tau, F=1, value=otm_price, opttype=opttype)
     return impvol
+
+
+def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None):
+    """
+    Simulate stock and variance paths using Andersen's QE scheme.
+
+    Parameters
+    ----------
+    T : float
+        Time to maturity
+    params : dict
+        Model parameters with keys: 'S0', 'v', 'lbd', 'vbar', 'nu', 'rho'
+    n_disc : int
+        Number of time discretization steps
+    n_mc : int
+        Number of Monte Carlo paths
+    seed : int, optional
+        Random seed for reproducibility
+
+    Returns
+    -------
+    S : ndarray, shape (n_disc + 1, n_mc)
+        Stock price paths
+    v : ndarray, shape (n_disc + 1, n_mc)
+        Variance paths
+    """
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+
+    ts = np.linspace(0.0, T, n_disc + 1)
+    dt = ts[1] - ts[0]
+
+    logS_qe = np.zeros((n_disc + 1, n_paths))
+    logS_qe[0, :] = np.log(params["S0"])
+
+    v_qe = np.zeros((n_disc + 1, n_paths))
+    v_qe[0, :] = params["v"]
+    nu = params["nu"]
+    lbd = params["lbd"]
+    vbar = params["vbar"]
+    rho = params["rho"]
+    edt = np.exp(-lbd * dt)
+
+    for i in range(n_disc):
+        m = (v_qe[i, :] - vbar) * edt + vbar
+        varv = (nu**2 / lbd) * (
+            edt * (1 - edt) * (v_qe[i, :] - vbar) + vbar / 2 * (1 - edt**2)
+        )
+
+        psi = varv / m**2
+
+        # sample v_{t+dt} using QE
+        Z = rng.standard_normal(size=n_paths)
+        U = rng.random(size=n_paths)
+
+        mask1 = psi <= psi_c
+        if np.any(mask1):
+            psi1 = psi[mask1]
+            m1 = m[mask1]
+            Z1 = Z[mask1]
+            # b^2 = (2 + 2*sqrt(1 - 0.5*psi) - psi)/psi
+            b2 = (
+                2.0 + 2.0 * np.sqrt(np.maximum(0.0, 1.0 - 0.5 * psi1)) - psi1
+            ) / np.maximum(psi1, 1e-32)
+            a = m1 / (1.0 + b2)
+            v_qe[i + 1, mask1] = a * (np.sqrt(np.maximum(b2, 0.0)) + Z1) ** 2
+
+        mask2 = ~mask1
+        if np.any(mask2):
+            psi2 = psi[mask2]
+            m2 = m[mask2]
+            U2 = U[mask2]
+            p = (psi2 - 1.0) / (psi2 + 1.0)
+            beta = m2 * (psi2 + 1.0) / 2.0
+            alive = p < U2
+            v_qe[i + 1, mask2] = 0.0
+            if np.any(alive):
+                U3 = rng.random(size=alive.sum())
+                v_qe[i + 1, mask2][alive] = -beta[alive] * np.log(U3)
+
+        int_v_trap_i = 0.5 * (v_qe[i, :] + v_qe[i + 1, :]) * dt  # trapezoidal rule
+        int_v_trap_i = np.maximum(int_v_trap_i, 0.0)
+
+        logS_qe[i + 1, :] = (
+            logS_qe[i, :]
+            - 0.5 * int_v_trap_i
+            + rho
+            * (v_qe[i + 1, :] - v_qe[i, :] - lbd * vbar * dt + lbd * int_v_trap_i)
+            / nu
+            + np.sqrt((1.0 - rho**2) * int_v_trap_i) * np.random.normal(size=n_paths)
+        )
+
+    return np.exp(logS_qe), v_qe
