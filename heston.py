@@ -75,27 +75,29 @@ def impvol_heston_charfunc(k, tau, params):
 
 def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None):
     """
-    Simulate stock and variance paths using Andersen's QE scheme.
+    Simulate Heston model paths using Andersen's QE discretization scheme.
 
     Parameters
     ----------
     T : float
-        Time to maturity
+        Time to maturity.
     params : dict
-        Model parameters with keys: 'S0', 'v', 'lbd', 'vbar', 'nu', 'rho'
+        Model parameters: 'S0', 'v', 'lbd', 'vbar', 'nu', 'rho'.
     n_disc : int
-        Number of time discretization steps
-    n_mc : int
-        Number of Monte Carlo paths
+        Number of discretization steps.
+    n_paths : int
+        Number of Monte Carlo paths.
+    psi_c : float, default 1.5
+        Critical value for quadratic/exponential scheme switching.
     seed : int, optional
-        Random seed for reproducibility
+        Random seed for reproducibility.
 
     Returns
     -------
-    S : ndarray, shape (n_disc + 1, n_mc)
-        Stock price paths
-    v : ndarray, shape (n_disc + 1, n_mc)
-        Variance paths
+    S : ndarray, shape (n_disc + 1, n_paths)
+        Stock price paths.
+    v : ndarray, shape (n_disc + 1, n_paths)
+        Variance paths.
     """
     if seed is not None:
         rng = np.random.default_rng(seed)
@@ -122,27 +124,23 @@ def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None
 
         psi = varv / m**2
 
-        # sample v_{t+dt} using QE
-        Z = rng.standard_normal(size=n_paths)
-        U = rng.random(size=n_paths)
+        # sample v_{t+dt} using QE scheme
 
         mask1 = psi <= psi_c
         if np.any(mask1):
             psi1 = psi[mask1]
             m1 = m[mask1]
-            Z1 = Z[mask1]
+            Z1 = rng.standard_normal(size=mask1.sum())
             # b^2 = (2 + 2*sqrt(1 - 0.5*psi) - psi)/psi
-            b2 = (
-                2.0 + 2.0 * np.sqrt(np.maximum(0.0, 1.0 - 0.5 * psi1)) - psi1
-            ) / np.maximum(psi1, 1e-32)
+            b2 = (2.0 + 2.0 * np.sqrt(1.0 - 0.5 * psi1) - psi1) / psi1
             a = m1 / (1.0 + b2)
-            v_qe[i + 1, mask1] = a * (np.sqrt(np.maximum(b2, 0.0)) + Z1) ** 2
+            v_qe[i + 1, mask1] = a * (np.sqrt(b2) + Z1) ** 2
 
         mask2 = ~mask1
         if np.any(mask2):
             psi2 = psi[mask2]
             m2 = m[mask2]
-            U2 = U[mask2]
+            U2 = rng.random(size=mask2.sum())
             p = (psi2 - 1.0) / (psi2 + 1.0)
             beta = m2 * (psi2 + 1.0) / 2.0
             alive = p < U2
@@ -152,7 +150,6 @@ def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None
                 v_qe[i + 1, mask2][alive] = -beta[alive] * np.log(U3)
 
         int_v_trap_i = 0.5 * (v_qe[i, :] + v_qe[i + 1, :]) * dt  # trapezoidal rule
-        int_v_trap_i = np.maximum(int_v_trap_i, 0.0)
 
         logS_qe[i + 1, :] = (
             logS_qe[i, :]
