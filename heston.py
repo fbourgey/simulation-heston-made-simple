@@ -73,7 +73,9 @@ def impvol_heston_charfunc(k, tau, params):
     return impvol
 
 
-def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None):
+def simulate_paths_qe_scheme(
+    T, params, n_disc, n_paths, psi_c=1.5, seed=None, eps=1e-14
+):
     """
     Simulate Heston model paths using Andersen's QE discretization scheme.
 
@@ -91,6 +93,8 @@ def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None
         Critical value for quadratic/exponential scheme switching.
     seed : int, optional
         Random seed for reproducibility.
+    eps : float, default 1e-14
+        Floor to keep conditional mean/variance and v_t non-negative.
 
     Returns
     -------
@@ -100,56 +104,66 @@ def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None
         Variance paths.
     """
     if seed is not None:
-        rng = np.random.default_rng(seed)
+        np.random.seed(seed)
 
-    ts = np.linspace(0.0, T, n_disc + 1)
-    dt = ts[1] - ts[0]
-
-    logS_qe = np.zeros((n_disc + 1, n_paths))
-    logS_qe[0, :] = np.log(params["S0"])
-
-    v_qe = np.zeros((n_disc + 1, n_paths))
-    v_qe[0, :] = params["v"]
     nu = params["nu"]
     lbd = params["lbd"]
     vbar = params["vbar"]
     rho = params["rho"]
+
+    logS_qe = np.zeros((n_disc + 1, n_paths), dtype=float)
+    v_qe = np.zeros((n_disc + 1, n_paths), dtype=float)
+    logS_qe[0, :] = np.log(params["S0"])
+    v_qe[0, :] = params["v"]
+
+    ts = np.linspace(0.0, T, n_disc + 1)
+    dt = ts[1] - ts[0]
     edt = np.exp(-lbd * dt)
 
     for i in range(n_disc):
+        # conditional mean and variance
         m = (v_qe[i, :] - vbar) * edt + vbar
-        varv = (nu**2 / lbd) * (
+        m = np.maximum(m, eps)  # ensure positivity
+        s2 = (nu**2 / lbd) * (
             edt * (1 - edt) * (v_qe[i, :] - vbar) + vbar / 2 * (1 - edt**2)
         )
+        # compute relative variance
+        psi = s2 / m**2
 
-        psi = varv / m**2
+        # Regime 1: Quadratic form
+        mask_quad = psi <= psi_c
+        if np.any(mask_quad):
+            psi_quad = psi[mask_quad]
+            Z_quad = np.random.normal(size=mask_quad.sum())
+            b2 = (2.0 + 2.0 * np.sqrt(1.0 - psi_quad / 2.0) - psi_quad) / psi_quad
+            a = m[mask_quad] / (1.0 + b2)
+            v_qe[i + 1, mask_quad] = a * (b2**0.5 + Z_quad) ** 2
 
-        # sample v_{t+dt} using QE scheme
+        # Regime 2: Exponential form
+        mask_exp = ~mask_quad
+        if np.any(mask_exp):
+            psi_exp = psi[mask_exp]
+            # clip p to [0, 1)
+            p = np.clip((psi_exp - 1.0) / (psi_exp + 1.0), 0.0, 1.0 - 1e-15)
+            beta = m[mask_exp] * (psi_exp + 1.0) / 2.0
 
-        mask1 = psi <= psi_c
-        if np.any(mask1):
-            psi1 = psi[mask1]
-            m1 = m[mask1]
-            Z1 = rng.standard_normal(size=mask1.sum())
-            # b^2 = (2 + 2*sqrt(1 - 0.5*psi) - psi)/psi
-            b2 = (2.0 + 2.0 * np.sqrt(1.0 - 0.5 * psi1) - psi1) / psi1
-            a = m1 / (1.0 + b2)
-            v_qe[i + 1, mask1] = a * (np.sqrt(b2) + Z1) ** 2
+            U_exp = np.random.uniform(0.0, 1.0, size=mask_exp.sum())
+            alive = U_exp > p  # if False -> atom at zero
 
-        mask2 = ~mask1
-        if np.any(mask2):
-            psi2 = psi[mask2]
-            m2 = m[mask2]
-            U2 = rng.random(size=mask2.sum())
-            p = (psi2 - 1.0) / (psi2 + 1.0)
-            beta = m2 * (psi2 + 1.0) / 2.0
-            alive = p < U2
-            v_qe[i + 1, mask2] = 0.0
+            # start at zero
+            v_qe[i + 1, mask_exp] = 0.0
             if np.any(alive):
-                U3 = rng.random(size=alive.sum())
-                v_qe[i + 1, mask2][alive] = -beta[alive] * np.log(U3)
+                U_exp_new = np.random.uniform(0.0, 1.0, size=alive.sum())
+                U_exp_new = np.clip(U_exp_new, eps, 1.0)
+                idx_exp = np.where(mask_exp)[0]
+                alive_idx = idx_exp[alive]
+                v_qe[i + 1, alive_idx] = -beta[alive] * np.log(U_exp_new)
 
-        int_v_trap_i = 0.5 * (v_qe[i, :] + v_qe[i + 1, :]) * dt  # trapezoidal rule
+        v_qe[i + 1, :] = np.maximum(v_qe[i + 1, :], eps)  # ensure positivity
+
+        # trapezoidal rule for integrated variance
+        int_v_trap_i = 0.5 * (v_qe[i, :] + v_qe[i + 1, :]) * dt
+        int_v_trap_i = np.maximum(int_v_trap_i, 0.0)
 
         logS_qe[i + 1, :] = (
             logS_qe[i, :]
@@ -157,7 +171,8 @@ def simulate_variance_qe_scheme(T, params, n_disc, n_paths, psi_c=1.5, seed=None
             + rho
             * (v_qe[i + 1, :] - v_qe[i, :] - lbd * vbar * dt + lbd * int_v_trap_i)
             / nu
-            + np.sqrt((1.0 - rho**2) * int_v_trap_i) * np.random.normal(size=n_paths)
+            + np.sqrt(np.maximum((1.0 - rho**2) * int_v_trap_i, 0.0))
+            * np.random.normal(size=n_paths)
         )
 
     return np.exp(logS_qe), v_qe
