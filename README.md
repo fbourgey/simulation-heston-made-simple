@@ -1,7 +1,6 @@
-# heston-simulation
+# simulation-heston-made-simple
 
-This repository focuses on the simulation of the Heston model. It reproduces
-the results from the following paper:
+This repository reproduces results from:
 
 - Abi Jaber, Eduardo.
 *Simulation of Heston made simple*. Risk. June 2025.
